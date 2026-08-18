@@ -1,15 +1,67 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from typing import List
 
 from database import engine, get_db, Base
 import models
 import schemas
+import auth
 
-# Создаёт таблицы в БД на основе моделей, если их ещё нет
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+# --- Зависимость: получить текущего пользователя по токену ---
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+    )
+    payload = auth.decode_access_token(token)
+    if payload is None:
+        raise credentials_exception
+
+    user_id = payload.get("user_id")
+    if user_id is None:
+        raise credentials_exception
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if user is None:
+        raise credentials_exception
+
+    return user
+
+# --- Регистрация ---
+
+@app.post("/register", response_model=schemas.UserResponse)
+def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    existing_user = db.query(models.User).filter(models.User.email == user.email).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    new_user = models.User(
+        email=user.email,
+        hashed_password=auth.hash_password(user.password)
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+# --- Логин ---
+
+@app.post("/login", response_model=schemas.Token)
+def login(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.email == user.email).first()
+    if not db_user or not auth.verify_password(user.password, db_user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    access_token = auth.create_access_token(data={"user_id": db_user.id})
+    return {"access_token": access_token, "token_type": "bearer"}
 
 # CREATE — создать задачу
 @app.post("/tasks", response_model=schemas.TaskResponse)
